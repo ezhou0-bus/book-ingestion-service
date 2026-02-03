@@ -4,9 +4,12 @@ import traceback
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-import supabase
+# Supabase client
 from supabase import create_client
-from zlibrary_to_notebooklm import book_to_notebook  # core ingestion function
+import mimetypes
+
+# Vendored zlibrary-to-notebooklm
+from zlibrary_to_notebooklm.book_parser import book_to_notebook
 
 # ----------------------------
 # CONFIG
@@ -14,8 +17,27 @@ from zlibrary_to_notebooklm import book_to_notebook  # core ingestion function
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+AUDIO_BUCKET = "books"  # Supabase storage bucket for audio
 
-# FastAPI app
+# ----------------------------
+# HELPERS
+# ----------------------------
+def upload_audio_to_supabase(local_path, bucket=AUDIO_BUCKET, dest_path=None):
+    """
+    Uploads a local audio file to Supabase storage and returns the public URL.
+    """
+    if not dest_path:
+        dest_path = os.path.basename(local_path)
+
+    with open(local_path, "rb") as f:
+        supabase_client.storage.from_(bucket).upload(dest_path, f, content_type=mimetypes.guess_type(local_path)[0])
+
+    url = supabase_client.storage.from_(bucket).get_public_url(dest_path)
+    return url
+
+# ----------------------------
+# FASTAPI APP
+# ----------------------------
 app = FastAPI(title="Book Ingestion Service")
 
 # ----------------------------
@@ -24,7 +46,7 @@ app = FastAPI(title="Book Ingestion Service")
 class BookRequest(BaseModel):
     title: str
     author: str
-    file_url: str = None  # Optional, if uploading PDF/EPUB
+    file_url: str = None  # optional, if uploading PDF/EPUB
 
 # ----------------------------
 # HEALTHCHECK
@@ -34,22 +56,22 @@ def root():
     return {"status": "Book ingestion service running"}
 
 # ----------------------------
-# UPLOAD BOOK
+# UPLOAD BOOK ENDPOINT
 # ----------------------------
 @app.post("/upload_book")
 def upload_book(book: BookRequest):
     start_total = time.time()
     notebook_id = None
+    processing_steps = []
 
     print(f"\n=== Started ingestion for book: {book.title} by {book.author} ===")
-    processing_steps = []
 
     # Step 1: fetch book
     try:
         start = time.time()
         print("Step 1 - fetching book...")
-        # zlibrary handles download internally if file_url not provided
-        file_path = book.file_url  # If provided, else zlibrary fetches by title/author
+        file_path = book.file_url  # optional external file URL
+        # zlibrary handles download internally if file_path is None
         processing_steps.append({"id": "fetch_book", "label": "Fetch book (Render.com)", "status": "done"})
         print(f"Step 1 - done in {time.time() - start:.2f}s")
     except Exception as e:
@@ -72,7 +94,7 @@ def upload_book(book: BookRequest):
             title=book.title,
             author=book.author,
             file_path=file_path,
-            generate_audio=True  # generate mp3 files
+            generate_audio=True
         )
         processing_steps.append({"id": "generate", "label": "Generate summary & audio", "status": "done"})
         print(f"Step 2 - done in {time.time() - start:.2f}s")
@@ -88,10 +110,11 @@ def upload_book(book: BookRequest):
             "processing_steps": processing_steps
         }
 
-    # Step 3: save results to Superbase
+    # Step 3: save results to Supabase
     try:
         start = time.time()
         print("Step 3 - saving results to Supabase...")
+
         # Save book record
         book_record = {
             "title": book.title,
@@ -101,16 +124,24 @@ def upload_book(book: BookRequest):
             "file_url": book.file_url,
             "processing_steps": str(processing_steps)
         }
-        res = supabase_client.table("books").insert(book_record).execute()
+        supabase_client.table("books").insert(book_record).execute()
 
-        # Save chapters
+        # Save chapters and upload audio
         for idx, chapter in enumerate(chapters):
+            audio_url = None
+            if audio_files and audio_files[idx]:
+                audio_url = upload_audio_to_supabase(
+                    audio_files[idx],
+                    bucket=AUDIO_BUCKET,
+                    dest_path=f"{notebook_id}_chapter{idx}.mp3"
+                )
+
             supabase_client.table("chapters").insert({
                 "book_id": notebook_id,
                 "chapter_idx": idx,
                 "title": chapter.get("title"),
                 "summary": chapter.get("summary"),
-                "audio_url": audio_files[idx] if audio_files else None
+                "audio_url": audio_url
             }).execute()
 
         processing_steps.append({"id": "save", "label": "Save results", "status": "done"})
@@ -138,9 +169,9 @@ def upload_book(book: BookRequest):
     }
 
 # ----------------------------
-# ENTRY POINT
+# ENTRY POINT FOR RENDER
 # ----------------------------
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 10000))  # Render dynamic port
+    port = int(os.environ.get("PORT", 10000))  # dynamic Render port
     uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
