@@ -1,6 +1,6 @@
-fastapi
-uvicorn
-pydantic
-zlibrary-to-notebooklm
-supabase
-requests
+fastapi==0.128.0
+uvicorn==0.40.0
+pydantic==2.12.5
+supabase==3.34.0
+requests==2.31.0
+gTTS==2.3.2
