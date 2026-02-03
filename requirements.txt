@@ -1,7 +1,8 @@
 fastapi==0.128.0
 uvicorn==0.40.0
 pydantic==2.12.5
-supabase==2.18.1
-requests==2.31.0
-gTTS==2.3.2
+ebooklib==0.18
+beautifulsoup4==4.12.2
+playwright==1.41.1
+
 
